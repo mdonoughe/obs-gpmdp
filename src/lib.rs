@@ -11,15 +11,17 @@ extern crate websocket;
 #[macro_use]
 pub mod obs;
 
-use futures::future::{Either, Future};
-use futures::stream::Stream;
+use futures::future::{self, Either, Future};
+use futures::stream::{self, Stream};
 use futures::sync::oneshot;
 use std::io;
 use std::sync::Mutex;
 use std::thread::{self, JoinHandle};
+use std::time::Duration;
 use std::os::raw::c_char;
-use tokio_core::reactor::Core;
+use tokio_core::reactor::{Core, Timeout};
 use websocket::{ClientBuilder, OwnedMessage};
+use websocket::url::Url;
 
 const NAME: *const c_char = b"obs-gpmdp\0" as *const u8 as *const c_char;
 const AUTHOR: *const c_char =
@@ -76,7 +78,7 @@ fn set_text(target: *const c_char, text: &str) {
     if let Some(mut source) = obs::get_source_by_name(target) {
         match source.get_id().as_ref() {
             "text_gdiplus" | "text_ft2_source" => {
-                info!("text should be changed to {:?}", text);
+                debug!("text should be changed to {:?}", text);
                 let mut data = obs::Data::new();
                 data.set(KEY_TEXT, text);
                 source.update(&data);
@@ -108,27 +110,58 @@ pub unsafe extern "C" fn obs_module_load() -> bool {
                 error!("Failed to return shutdown handle: {:?}", error);
                 return;
             }
-            let runner = ClientBuilder::new("ws://127.0.0.1:5672")
-                .unwrap()
-                .async_connect_insecure(&core.handle())
+            let address = Url::parse("ws://127.0.0.1:5672").unwrap();
+            let handle = core.handle();
+            let runner = stream::repeat::<_, websocket::WebSocketError>(())
+                .and_then(|_| {
+                    future::ok(
+                        ClientBuilder::from_url(&address)
+                            .async_connect_insecure(&handle)
+                            .into_stream()
+                            .chain(
+                                future::lazy(|| Timeout::new(Duration::new(1, 0), &handle))
+                                    .into_stream()
+                                    .then(|_| Ok(()))
+                                    .filter_map(|_| None),
+                            ),
+                    )
+                })
+                .flatten()
                 .and_then(|(duplex, _)| {
                     info!("connected");
                     let (_, stream) = duplex.split();
-                    stream.for_each(|message| {
-                        if let OwnedMessage::Text(ref text) = message {
-                            match serde_json::from_str::<Message>(text) {
-                                Ok(Message::Track(track)) => {
-                                    info!("got data: {:?}", track);
-                                    update_obs(&track);
-                                }
-                                Err(error) => {
-                                    // this will log often because we only handle track messages
-                                    debug!("Failed to parse message {:?}: {:?}", message, error);
+                    future::ok(stream.filter_map(|message| {
+                        match message {
+                            OwnedMessage::Text(ref text) => {
+                                match serde_json::from_str::<Message>(text) {
+                                    Ok(message) => Some(message),
+                                    Err(error) => {
+                                        // this will log often because we only handle track messages
+                                        debug!(
+                                            "Failed to parse message {:?}: {:?}",
+                                            message, error
+                                        );
+                                        None
+                                    }
                                 }
                             }
+                            _ => None,
                         }
-                        futures::done(Ok(()))
-                    })
+                    }))
+                })
+                .flatten()
+                .then(|result| future::ok::<_, ()>(result))
+                .for_each(|message| {
+                    match message {
+                        Ok(Message::Track(track)) => {
+                            info!("got data: {:?}", track);
+                            update_obs(&track);
+                        }
+                        Err(e) => {
+                            debug!("got error: {:?}", e);
+                        }
+                    }
+                    future::ok(())
                 });
             match core.run(Future::select2(runner, shutdown_receive)) {
                 Ok(Either::A(_)) => {
