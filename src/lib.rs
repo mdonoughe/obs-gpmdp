@@ -100,6 +100,13 @@ fn update_obs(track: &TrackPayload) {
     );
 }
 
+fn clear_obs() {
+    set_text(TARGET_TITLE, "");
+    set_text(TARGET_ARTIST, "");
+    set_text(TARGET_ALBUM, "");
+    set_text(TARGET_ARTIST_ALBUM, "");
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn obs_module_load() -> bool {
     let (send, receive) = oneshot::channel::<Result<oneshot::Sender<()>, io::Error>>();
@@ -159,6 +166,7 @@ pub unsafe extern "C" fn obs_module_load() -> bool {
                         }
                         Err(e) => {
                             debug!("got error: {:?}", e);
+                            clear_obs();
                         }
                     }
                     future::ok(())
