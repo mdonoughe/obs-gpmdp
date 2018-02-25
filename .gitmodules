@@ -1,0 +1,3 @@
+[submodule "obs"]
+	path = obs
+	url = https://github.com/jp9000/obs-studio.git
