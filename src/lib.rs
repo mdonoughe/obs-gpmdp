@@ -2,6 +2,8 @@ extern crate futures;
 extern crate hyper;
 extern crate hyper_tls;
 extern crate image;
+#[macro_use]
+extern crate lazy_static;
 extern crate serde;
 #[macro_use]
 extern crate serde_derive;
@@ -10,10 +12,11 @@ extern crate tokio_core;
 extern crate websocket;
 
 mod macros;
-mod art;
 mod libobs;
-pub mod obs;
+mod obs;
+mod art;
 
+use art::AlbumArtSource;
 use futures::{future, stream, Future, Stream};
 use futures::sync::oneshot;
 use image::{Pixel, RgbaImage};
@@ -27,11 +30,82 @@ use tokio_core::reactor::{Core, Handle, Timeout};
 use websocket::{ClientBuilder, OwnedMessage, WebSocketError};
 use websocket::url::Url;
 
-const NAME: *const c_char = b"obs-gpmdp\0" as *const u8 as *const c_char;
-const AUTHOR: *const c_char =
-    b"Matthew Donoughe <mdonoughe@gmail.com>\0" as *const u8 as *const c_char;
-const DESCRIPTION: *const c_char =
-    b"Display information from GPMDP.\0" as *const u8 as *const c_char;
+obs_declare_module!(
+    GpmpdModule,
+    "gpmdp",
+    "Display information from GPMDP.",
+    "Matthew Donoughe <mdonoughe@gmail.com>"
+);
+
+obs_module_use_default_locale!("en-US");
+
+struct GpmpdModule {
+    _listener: ListenerHandle,
+}
+
+impl obs::Module for GpmpdModule {
+    fn load() -> Option<Box<Self>> {
+        let art = Arc::new(Mutex::new(Some(RgbaImage::from_fn(128, 128, |x, y| {
+            image::Rgba::from_channels(x as u8, y as u8, 127u8, 255u8)
+        }))));
+        let load_art_mutex = art.clone();
+        let texture = Arc::new(RefCell::new(None));
+        obs::register_source(
+            ID_ART,
+            &obs_module_text("GPMDP Album Art"),
+            move |_, source| AlbumArtSource::new(source, &art, &texture),
+        );
+
+        let (startup_send, startup_receive) = oneshot::channel::<Result<(), io::Error>>();
+        let (shutdown_send, shutdown_receive) = oneshot::channel::<()>();
+        let address = Url::parse("ws://127.0.0.1:5672").unwrap();
+        let thread = thread::spawn(move || match Core::new() {
+            Ok(mut core) => {
+                if let Err(error) = startup_send.send(Ok(())) {
+                    error!("Failed to announce startup: {:?}", error);
+                    return;
+                }
+                let handle = core.handle();
+                match core.run(Future::select2(
+                    read_events(address, load_art_mutex, &handle),
+                    shutdown_receive,
+                )) {
+                    Ok(future::Either::A(_)) => {
+                        error!("client exited");
+                    }
+                    Ok(future::Either::B(_)) | Err(future::Either::B((_, _))) => {
+                        info!("shutting down");
+                    }
+                    Err(future::Either::A(error)) => {
+                        error!("client failed: {:?}", error);
+                    }
+                };
+            }
+            Err(err) => {
+                if let Err(error) = startup_send.send(Err(err)) {
+                    error!("Failed to announce startup error: {:?}", error);
+                }
+            }
+        });
+        match startup_receive.wait() {
+            Ok(Ok(())) => Some(Box::new(GpmpdModule {
+                _listener: ListenerHandle::new(thread, shutdown_send),
+            })),
+            Ok(Err(error)) => {
+                error!("Failed to start core: {:?}", error);
+                let _ = thread.join();
+                None
+            }
+            Err(error) => {
+                error!("Failed to start core: {:?}", error);
+                if let Err(thread_error) = thread.join() {
+                    error!("Thread error: {:?}", thread_error);
+                }
+                None
+            }
+        }
+    }
+}
 
 const TARGET_TITLE: *const c_char = b"GPMDP Title\0" as *const u8 as *const c_char;
 const TARGET_ARTIST: *const c_char = b"GPMDP Artist\0" as *const u8 as *const c_char;
@@ -41,11 +115,6 @@ const TARGET_ARTIST_ALBUM: *const c_char = b"GPMDP Artist Album\0" as *const u8 
 const KEY_TEXT: *const c_char = b"text\0" as *const u8 as *const c_char;
 
 const ID_ART: *const c_char = b"gpmdp-album-art\0" as *const u8 as *const c_char;
-
-struct ListenerHandle {
-    thread: JoinHandle<()>,
-    shutdown: oneshot::Sender<()>,
-}
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -62,21 +131,19 @@ enum Message {
     Track(TrackPayload),
 }
 
+struct ListenerHandle {
+    _thread: JoinHandle<()>,
+    _shutdown: oneshot::Sender<()>,
+}
+
 impl ListenerHandle {
     pub fn new(thread: JoinHandle<()>, shutdown: oneshot::Sender<()>) -> Self {
         return ListenerHandle {
-            thread: thread,
-            shutdown: shutdown,
+            _thread: thread,
+            _shutdown: shutdown,
         };
     }
-
-    pub fn stop(self) -> () {
-        let _ = self.shutdown.send(());
-        let _ = self.thread.join();
-    }
 }
-
-static mut LISTENER: Option<ListenerHandle> = None;
 
 fn set_text(target: *const c_char, text: &str) {
     if let Some(mut source) = obs::get_source_by_name(target) {
@@ -225,128 +292,4 @@ fn read_events(
                 Err((err, _)) => Err(err),
             }),
     ) as Box<Future<Item = (), Error = ConnectionError>>
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn obs_module_load() -> bool {
-    let art = Arc::new(Mutex::new(Some(RgbaImage::from_fn(128, 128, |x, y| {
-        image::Rgba::from_channels(x as u8, y as u8, 127u8, 255u8)
-    }))));
-    let load_art_mutex = art.clone();
-    let texture = Arc::new(RefCell::new(None));
-    obs::register_source(ID_ART, "GPMDP Album Art", move |_, source| {
-        AlbumArtSource::new(source, &art, &texture)
-    });
-
-    let (startup_send, startup_receive) = oneshot::channel::<Result<(), io::Error>>();
-    let (shutdown_send, shutdown_receive) = oneshot::channel::<()>();
-    let address = Url::parse("ws://127.0.0.1:5672").unwrap();
-    let thread = thread::spawn(move || match Core::new() {
-        Ok(mut core) => {
-            if let Err(error) = startup_send.send(Ok(())) {
-                error!("Failed to announce startup: {:?}", error);
-                return;
-            }
-            let handle = core.handle();
-            match core.run(Future::select2(
-                read_events(address, load_art_mutex, &handle),
-                shutdown_receive,
-            )) {
-                Ok(future::Either::A(_)) => {
-                    error!("client exited");
-                }
-                Ok(future::Either::B(_)) => {
-                    info!("shutting down");
-                }
-                Err(future::Either::A(error)) => {
-                    error!("client failed: {:?}", error);
-                }
-                Err(future::Either::B((error, _))) => {
-                    error!("shutdown listener failed: {:?}", error);
-                }
-            };
-        }
-        Err(err) => {
-            if let Err(error) = startup_send.send(Err(err)) {
-                error!("Failed to announce startup error: {:?}", error);
-            }
-        }
-    });
-    match startup_receive.wait() {
-        Ok(Ok(())) => {
-            LISTENER = Some(ListenerHandle::new(thread, shutdown_send));
-            true
-        }
-        Ok(Err(error)) => {
-            error!("Failed to start core: {:?}", error);
-            let _ = thread.join();
-            false
-        }
-        Err(error) => {
-            error!("Failed to start core: {:?}", error);
-            if let Err(thread_error) = thread.join() {
-                error!("Thread error: {:?}", thread_error);
-            }
-            false
-        }
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn obs_module_unload() -> () {
-    if let Some(listener) = LISTENER.take() {
-        listener.stop();
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn obs_module_name() -> *const c_char {
-    NAME
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn obs_module_author() -> *const c_char {
-    AUTHOR
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn obs_module_description() -> *const c_char {
-    DESCRIPTION
-}
-
-struct AlbumArtSource {
-    new_art: Arc<Mutex<Option<RgbaImage>>>,
-    texture: Arc<RefCell<Option<obs::Texture>>>,
-}
-impl AlbumArtSource {
-    pub fn new(
-        _source: &obs::ObsSource,
-        new_art: &Arc<Mutex<Option<RgbaImage>>>,
-        texture: &Arc<RefCell<Option<obs::Texture>>>,
-    ) -> Self {
-        AlbumArtSource {
-            new_art: new_art.clone(),
-            texture: texture.clone(),
-        }
-    }
-}
-impl obs::VideoSource for AlbumArtSource {
-    fn get_width(&self) -> u32 {
-        (*self.texture).borrow().as_ref().map_or(0, |t| t.width())
-    }
-    fn get_height(&self) -> u32 {
-        (*self.texture).borrow().as_ref().map_or(0, |t| t.height())
-    }
-    fn video_render(&mut self) {
-        let mut guard = self.new_art.lock().unwrap();
-        if let Some(image) = guard.take() {
-            let mut texture = (*self.texture).borrow_mut();
-            *texture = Some(obs::Texture::new(&image));
-            debug!("activated image {}x{}", image.width(), image.height());
-        }
-
-        if let Some(ref texture) = *self.texture.borrow() {
-            texture.draw();
-        }
-    }
 }

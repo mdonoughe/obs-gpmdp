@@ -6,7 +6,7 @@ use std::os::raw::{c_char, c_void};
 
 pub const DUMMY_LOG_TEMPLATE: *const c_char = b"[gpmdp] %s\0" as *const u8 as *const c_char;
 
-pub fn obs_log(level: i32, text: String) {
+pub fn blog(level: i32, text: String) {
     unsafe {
         libobs::blog(
             level,
@@ -80,25 +80,6 @@ pub fn get_source_by_name(name: *const c_char) -> Option<ObsSource> {
             ptr => Some(ObsSource(ptr)),
         }
     }
-}
-
-const LIBOBS_API_MAJOR_VER: u8 = 21;
-const LIBOBS_API_MINOR_VER: u8 = 0;
-const LIBOBS_API_PATCH_VER: u16 = 2;
-const LIBOBS_API_VER: u32 = ((LIBOBS_API_MAJOR_VER as u32) << 24)
-    | ((LIBOBS_API_MINOR_VER as u32) << 16)
-    | LIBOBS_API_PATCH_VER as u32;
-
-static mut OBS_MODULE_POINTER: Option<*const i32> = None;
-
-#[no_mangle]
-pub unsafe extern "C" fn obs_module_set_pointer(module: *const i32) -> () {
-    OBS_MODULE_POINTER = Some(module);
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn obs_module_ver() -> u32 {
-    LIBOBS_API_VER
 }
 
 pub trait VideoSource {
@@ -244,3 +225,41 @@ impl Drop for Texture {
         }
     }
 }
+
+pub trait Module {
+    fn load() -> Option<Box<Self>>;
+}
+
+pub struct Lookup(*mut libobs::lookup_t);
+
+impl Lookup {
+    pub fn new(lookup: *mut libobs::lookup_t) -> Self {
+        Lookup(lookup)
+    }
+
+    pub fn getstr(&self, val: &str) -> Option<String> {
+        unsafe {
+            let mut ptr: *const c_char = ptr::null();
+            if libobs::text_lookup_getstr(
+                self.0,
+                val.as_bytes().as_ptr() as *const c_char,
+                &mut ptr,
+            ) {
+                Some(CStr::from_ptr(ptr).to_string_lossy().into_owned())
+            } else {
+                None
+            }
+        }
+    }
+}
+
+impl Drop for Lookup {
+    fn drop(&mut self) {
+        unsafe {
+            libobs::text_lookup_destroy(self.0);
+        }
+    }
+}
+
+unsafe impl Send for Lookup {}
+unsafe impl Sync for Lookup {}

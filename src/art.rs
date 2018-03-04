@@ -3,8 +3,11 @@ use hyper::{mime, Client, Method, Request, StatusCode, Uri};
 use hyper::header::{q, Accept, ContentLength, ContentType, QualityItem};
 use hyper_tls::HttpsConnector;
 use image::{self, ImageFormat, RgbaImage};
+use obs::{ObsSource, Texture, VideoSource};
+use std::cell::RefCell;
 use std::rc::Rc;
 use std::str::FromStr;
+use std::sync::{Arc, Mutex};
 use tokio_core::reactor::Handle;
 
 // 4MB: enough for a 1024x1024 ARGB raw bitmap.
@@ -87,4 +90,41 @@ pub fn load(
                 )
             }),
     )
+}
+
+pub struct AlbumArtSource {
+    new_art: Arc<Mutex<Option<RgbaImage>>>,
+    texture: Arc<RefCell<Option<Texture>>>,
+}
+impl AlbumArtSource {
+    pub fn new(
+        _source: &ObsSource,
+        new_art: &Arc<Mutex<Option<RgbaImage>>>,
+        texture: &Arc<RefCell<Option<Texture>>>,
+    ) -> Self {
+        AlbumArtSource {
+            new_art: new_art.clone(),
+            texture: texture.clone(),
+        }
+    }
+}
+impl VideoSource for AlbumArtSource {
+    fn get_width(&self) -> u32 {
+        (*self.texture).borrow().as_ref().map_or(0, |t| t.width())
+    }
+    fn get_height(&self) -> u32 {
+        (*self.texture).borrow().as_ref().map_or(0, |t| t.height())
+    }
+    fn video_render(&mut self) {
+        let mut guard = self.new_art.lock().unwrap();
+        if let Some(image) = guard.take() {
+            let mut texture = (*self.texture).borrow_mut();
+            *texture = Some(Texture::new(&image));
+            debug!("activated image {}x{}", image.width(), image.height());
+        }
+
+        if let Some(ref texture) = *self.texture.borrow() {
+            texture.draw();
+        }
+    }
 }
