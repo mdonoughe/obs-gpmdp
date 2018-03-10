@@ -1,26 +1,24 @@
+use {Client, ClientAccess, ClientId};
 use futures::{future, Future, Stream};
-use hyper::{mime, Client, Method, Request, StatusCode, Uri};
+use hyper::{self, mime, Method, Request, StatusCode, Uri};
 use hyper::header::{q, Accept, ContentLength, ContentType, QualityItem};
 use hyper_tls::HttpsConnector;
 use image::{self, ImageFormat, RgbaImage};
-use obs::{ObsSource, Texture, VideoSource};
+use obs::{self, Data, ObsSource, Texture, VideoSource, VideoSourceDefinition};
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::str::FromStr;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use tokio_core::reactor::Handle;
 
 // 4MB: enough for a 1024x1024 ARGB raw bitmap.
 // for comparison, 3 minutes at 320kbps is about 7MB.
 const MAXIMUM_LENGTH: u64 = 4 * 1024 * 1024;
 
-pub fn load(
-    address: &str,
-    handle: &Handle,
-) -> Box<Future<Item = Option<RgbaImage>, Error = String>> {
+pub fn load(address: &str, handle: &Handle) -> Box<Future<Item = RgbaImage, Error = String>> {
     let address = Rc::new(address.to_string());
     let parse_error_address = address.clone();
-    let client = Client::configure()
+    let client = hyper::Client::configure()
         .connector(HttpsConnector::new(4, handle).unwrap())
         .build(handle);
     Box::new(
@@ -85,46 +83,129 @@ pub fn load(
             .and_then(|(body, format): (Vec<u8>, _)| {
                 future::result(
                     image::load_from_memory_with_format(&body, format)
-                        .and_then(|image| Ok(Some(image.to_rgba())))
+                        .and_then(|image| Ok(image.to_rgba()))
                         .map_err(|err| format!("could not decode album art: {:?}", err)),
                 )
             }),
     )
 }
 
-pub struct AlbumArtSource {
-    new_art: Arc<Mutex<Option<RgbaImage>>>,
-    texture: Arc<RefCell<Option<Texture>>>,
+pub(super) struct AlbumArtSourceDefinition {
+    client_access: Arc<ClientAccess>,
+    client: Mutex<Weak<ArtClient>>,
 }
-impl AlbumArtSource {
-    pub fn new(
-        _source: &ObsSource,
-        new_art: &Arc<Mutex<Option<RgbaImage>>>,
-        texture: &Arc<RefCell<Option<Texture>>>,
-    ) -> Self {
-        AlbumArtSource {
-            new_art: new_art.clone(),
-            texture: texture.clone(),
+
+struct ArtClient {
+    _client: Client,
+    texture: Arc<Mutex<Option<Texture>>>,
+}
+
+impl AlbumArtSourceDefinition {
+    pub fn new(client_access: &Arc<ClientAccess>) -> Self {
+        AlbumArtSourceDefinition {
+            client_access: client_access.clone(),
+            client: Mutex::new(Weak::default()),
         }
     }
 }
+
+impl VideoSourceDefinition for AlbumArtSourceDefinition {
+    type Source = AlbumArtSource;
+    fn create(&self, _settings: &Data, _source: &mut ObsSource) -> Self::Source {
+        let mut guard = self.client.lock().unwrap();
+        let art_client = match guard.upgrade() {
+            Some(art_client) => Some(art_client),
+            None => {
+                let texture = Arc::new(Mutex::new(None));
+                let art_address: RefCell<Option<String>> = RefCell::new(None);
+                let update_texture = texture.clone();
+                let client = self.client_access.client(&ClientId::Art, move |s, handle| {
+                    let mut art_address = art_address.borrow_mut();
+                    let address = s.as_ref()
+                        .and_then(|s| s.album_art.as_ref())
+                        .map(|s| s.as_str());
+                    let result: Box<Future<Item = (), Error = ()>> = match (&*art_address, address)
+                    {
+                        (_, None) => {
+                            let _graphics = obs::enter_graphics();
+                            let mut guard = update_texture.lock().unwrap();
+                            *guard = None;
+                            Box::new(future::ok(()))
+                        }
+                        (&Some(ref a), Some(b)) if a == b => Box::new(future::ok(())),
+                        (_, Some(address)) => {
+                            let update_texture = update_texture.clone();
+                            let err_texture = update_texture.clone();
+                            let err_address = address.to_string();
+                            Box::new(
+                                load(address, handle)
+                                    .and_then(move |image| {
+                                        let _graphics = obs::enter_graphics();
+                                        let mut guard = update_texture.lock().unwrap();
+                                        *guard = Some(Texture::new(&image));
+                                        future::ok(())
+                                    })
+                                    .or_else(move |err| {
+                                        println!(
+                                            "failed to load art from {}: {:?}",
+                                            err_address, err
+                                        );
+                                        let _graphics = obs::enter_graphics();
+                                        let mut guard = err_texture.lock().unwrap();
+                                        *guard = None;
+                                        future::ok(())
+                                    }),
+                            )
+                        }
+                    };
+                    *art_address = address.map(|a| a.to_string());
+                    result
+                });
+                match client {
+                    Ok(client) => {
+                        let art_client = Arc::new(ArtClient {
+                            _client: client,
+                            texture: texture,
+                        });
+                        *guard = Arc::downgrade(&art_client);
+                        Some(art_client)
+                    }
+                    Err(e) => {
+                        error!("failed to launch client to load art: {:?}", e);
+                        None
+                    }
+                }
+            }
+        };
+        AlbumArtSource { client: art_client }
+    }
+}
+
+pub struct AlbumArtSource {
+    client: Option<Arc<ArtClient>>,
+}
+
 impl VideoSource for AlbumArtSource {
+    //FIXME: acquiring the lock three times is bad not atomic or performant
     fn get_width(&self) -> u32 {
-        (*self.texture).borrow().as_ref().map_or(0, |t| t.width())
+        // obs doesn't like 0x0 sources
+        self.client
+            .as_ref()
+            .and_then(|c| c.texture.lock().unwrap().as_ref().map(|t| t.width()))
+            .unwrap_or(1)
     }
     fn get_height(&self) -> u32 {
-        (*self.texture).borrow().as_ref().map_or(0, |t| t.height())
+        // obs doesn't like 0x0 sources
+        self.client
+            .as_ref()
+            .and_then(|c| c.texture.lock().unwrap().as_ref().map(|t| t.height()))
+            .unwrap_or(1)
     }
     fn video_render(&mut self) {
-        let mut guard = self.new_art.lock().unwrap();
-        if let Some(image) = guard.take() {
-            let mut texture = (*self.texture).borrow_mut();
-            *texture = Some(Texture::new(&image));
-            debug!("activated image {}x{}", image.width(), image.height());
-        }
-
-        if let Some(ref texture) = *self.texture.borrow() {
-            texture.draw();
+        if let Some(ref client) = self.client {
+            if let Some(ref texture) = *client.texture.lock().unwrap() {
+                texture.draw();
+            }
         }
     }
 }

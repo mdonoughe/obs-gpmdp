@@ -23,21 +23,21 @@ macro_rules! error {
 #[macro_export]
 macro_rules! obs_declare_module {
     ($type:ty, $name:expr, $description:expr) => {
-        static mut OBS_MODULE_POINTER: ::std::option::Option<*mut $crate::libobs::obs_module_t> = ::std::option::Option::None;
+        static mut OBS_MODULE_POINTER: ::std::option::Option<*mut $crate::obs::obs_module_t> = ::std::option::Option::None;
         const OBS_MODULE_NAME: &'static str = concat!($name, "\0");
         const OBS_MODULE_DESCRIPTION: &'static str = concat!($description, "\0");
-        static mut MODULE_VALUE: ::std::option::Option<::std::boxed::Box<$type>> = ::std::option::Option::None;
+        static mut MODULE_VALUE: ::std::option::Option<$type> = ::std::option::Option::None;
 
         #[no_mangle]
-        pub unsafe extern "C" fn obs_module_set_pointer(module: *mut libobs::obs_module_t) -> () {
+        pub unsafe extern "C" fn obs_module_set_pointer(module: *mut $crate::obs::obs_module_t) -> () {
             OBS_MODULE_POINTER = ::std::option::Option::Some(module);
         }
 
         #[no_mangle]
         pub unsafe extern "C" fn obs_module_ver() -> u32 {
-            (($crate::libobs::LIBOBS_API_MAJOR_VER as u32) << 24)
-            | (($crate::libobs::LIBOBS_API_MINOR_VER as u32) << 16)
-            | $crate::libobs::LIBOBS_API_PATCH_VER as u32
+            (($crate::obs::LIBOBS_API_MAJOR_VER as u32) << 24)
+            | (($crate::obs::LIBOBS_API_MINOR_VER as u32) << 16)
+            | $crate::obs::LIBOBS_API_PATCH_VER as u32
         }
 
         #[no_mangle]
@@ -52,7 +52,7 @@ macro_rules! obs_declare_module {
 
         #[no_mangle]
         pub unsafe extern "C" fn obs_module_load() -> bool {
-            MODULE_VALUE = <$type as ::obs::Module>::load();
+            MODULE_VALUE = <$type as ::obs::Module<$type>>::load();
             MODULE_VALUE.is_some()
         }
 
@@ -101,10 +101,9 @@ macro_rules! obs_module_use_default_locale {
         #[no_mangle]
         pub unsafe extern "C" fn obs_module_set_locale(locale: *const ::std::os::raw::c_char) {
             let mut guard = OBS_MODULE_LOOKUP.write().unwrap();
-            *guard = ::std::option::Option::Some($crate::obs::Lookup::new(
-                $crate::libobs::obs_module_load_locale(OBS_MODULE_POINTER.unwrap(),
-                    OBS_MODULE_DEFAULT_LOCALE.as_bytes().as_ptr() as *const ::std::os::raw::c_char,
-                    locale)));
+            *guard = ::std::option::Option::Some($crate::obs::load_locale(OBS_MODULE_POINTER.unwrap(),
+                OBS_MODULE_DEFAULT_LOCALE.as_bytes().as_ptr() as *const ::std::os::raw::c_char,
+                locale))
         }
 
         #[no_mangle]

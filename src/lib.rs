@@ -8,30 +8,30 @@ extern crate serde;
 #[macro_use]
 extern crate serde_derive;
 extern crate serde_json;
+extern crate tera;
 extern crate tokio_core;
 extern crate websocket;
 
 mod macros;
-mod libobs;
 mod obs;
 mod art;
+mod text;
 
-use art::AlbumArtSource;
-use futures::{future, stream, Future, Stream};
+use art::AlbumArtSourceDefinition;
+use futures::{future, stream, Future, IntoFuture, Stream};
 use futures::sync::oneshot;
-use image::{Pixel, RgbaImage};
+use std::collections::BTreeMap;
 use std::io;
-use std::cell::RefCell;
-use std::os::raw::c_char;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
-use tokio_core::reactor::{Core, Handle, Timeout};
+use text::NowPlayingSourceDefinition;
+use tokio_core::reactor::{Core, Handle, Remote, Timeout};
 use websocket::{ClientBuilder, OwnedMessage, WebSocketError};
 use websocket::url::Url;
 
 obs_declare_module!(
-    GpmpdModule,
+    GpmdpModule,
     "gpmdp",
     "Display information from GPMDP.",
     "Matthew Donoughe <mdonoughe@gmail.com>"
@@ -39,35 +39,68 @@ obs_declare_module!(
 
 obs_module_use_default_locale!("en-US");
 
-struct GpmpdModule {
-    _listener: ListenerHandle,
+#[derive(Debug)]
+struct GpmdpState {
+    artist: Option<String>,
+    album: Option<String>,
+    title: Option<String>,
+    album_art: Option<String>,
 }
 
-impl obs::Module for GpmpdModule {
-    fn load() -> Option<Box<Self>> {
-        let art = Arc::new(Mutex::new(Some(RgbaImage::from_fn(128, 128, |x, y| {
-            image::Rgba::from_channels(x as u8, y as u8, 127u8, 255u8)
-        }))));
-        let load_art_mutex = art.clone();
-        let texture = Arc::new(RefCell::new(None));
-        obs::register_source(
-            ID_ART,
-            &obs_module_text("GPMDP Album Art"),
-            move |_, source| AlbumArtSource::new(source, &art, &texture),
-        );
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum ClientId {
+    Text(String),
+    Art,
+}
 
-        let (startup_send, startup_receive) = oneshot::channel::<Result<(), io::Error>>();
+impl ClientId {
+    pub fn to_owned(&self) -> ClientId {
+        match *self {
+            ClientId::Text(ref text) => ClientId::Text(text.to_string()),
+            ClientId::Art => ClientId::Art,
+        }
+    }
+}
+
+struct ClientState {
+    current_state: Option<GpmdpState>,
+    handlers: BTreeMap<
+        ClientId,
+        Box<Fn(&Option<GpmdpState>, &Handle) -> Box<Future<Item = (), Error = ()>> + Send>,
+    >,
+}
+
+struct Client {
+    id: ClientId,
+    client: Arc<Mutex<ClientState>>,
+    listener: Arc<ListenerHandle>,
+}
+
+impl Drop for Client {
+    fn drop(&mut self) {
+        self.client.lock().unwrap().handlers.remove(&self.id);
+    }
+}
+
+impl Client {
+    pub fn launch(id: &ClientId) -> Result<Self, String> {
+        let (startup_send, startup_receive) = oneshot::channel::<Result<Remote, io::Error>>();
         let (shutdown_send, shutdown_receive) = oneshot::channel::<()>();
         let address = Url::parse("ws://127.0.0.1:5672").unwrap();
+        let client = Arc::new(Mutex::new(ClientState {
+            current_state: None,
+            handlers: BTreeMap::new(),
+        }));
+        let core_client = client.clone();
         let thread = thread::spawn(move || match Core::new() {
             Ok(mut core) => {
-                if let Err(error) = startup_send.send(Ok(())) {
+                if let Err(error) = startup_send.send(Ok(core.remote())) {
                     error!("Failed to announce startup: {:?}", error);
                     return;
                 }
                 let handle = core.handle();
                 match core.run(Future::select2(
-                    read_events(address, load_art_mutex, &handle),
+                    read_events(address, core_client, &handle),
                     shutdown_receive,
                 )) {
                     Ok(future::Either::A(_)) => {
@@ -88,40 +121,107 @@ impl obs::Module for GpmpdModule {
             }
         });
         match startup_receive.wait() {
-            Ok(Ok(())) => Some(Box::new(GpmpdModule {
-                _listener: ListenerHandle::new(thread, shutdown_send),
-            })),
+            Ok(Ok(remote)) => Ok(Self {
+                id: id.to_owned(),
+                client: client,
+                listener: Arc::new(ListenerHandle::new(thread, shutdown_send, remote)),
+            }),
             Ok(Err(error)) => {
-                error!("Failed to start core: {:?}", error);
                 let _ = thread.join();
-                None
+                Err(format!("Failed to start core: {:?}", error))
             }
             Err(error) => {
-                error!("Failed to start core: {:?}", error);
-                if let Err(thread_error) = thread.join() {
-                    error!("Thread error: {:?}", thread_error);
-                }
-                None
+                let _ = thread.join();
+                Err(format!("Failed to start core: {:?}", error))
             }
         }
     }
 }
 
-const TARGET_TITLE: *const c_char = b"GPMDP Title\0" as *const u8 as *const c_char;
-const TARGET_ARTIST: *const c_char = b"GPMDP Artist\0" as *const u8 as *const c_char;
-const TARGET_ALBUM: *const c_char = b"GPMDP Album\0" as *const u8 as *const c_char;
-const TARGET_ARTIST_ALBUM: *const c_char = b"GPMDP Artist Album\0" as *const u8 as *const c_char;
+struct ClientAccess {
+    client: Mutex<(Weak<Mutex<ClientState>>, Weak<ListenerHandle>)>,
+}
 
-const KEY_TEXT: *const c_char = b"text\0" as *const u8 as *const c_char;
+impl ClientAccess {
+    pub fn client<F, R>(&self, id: &ClientId, action: F) -> Result<Client, String>
+    where
+        F: Fn(&Option<GpmdpState>, &Handle) -> R + Send + 'static,
+        R: IntoFuture<Item = (), Error = ()>,
+        R::Future: 'static,
+    {
+        let mut guard = self.client.lock().unwrap();
+        let result = match (guard.0.upgrade(), guard.1.upgrade()) {
+            (Some(client), Some(listener)) => Ok(Client {
+                id: id.to_owned(),
+                client: client,
+                listener: listener,
+            }),
+            _ => {
+                let handle = Client::launch(id);
+                if let Ok(ref handle) = handle {
+                    *guard = (
+                        Arc::downgrade(&handle.client),
+                        Arc::downgrade(&handle.listener),
+                    )
+                }
+                handle
+            }
+        };
+        if let Ok(ref handle) = result {
+            {
+                let mut guard = handle.client.lock().unwrap();
+                guard.handlers.insert(
+                    id.to_owned(),
+                    Box::new(move |s, h| Box::new(action(s, h).into_future())),
+                );
+                info!(
+                    "added handler {:?}. there are now {} handlers.",
+                    id,
+                    guard.handlers.len()
+                );
+            }
+            let spawn_client = handle.client.clone();
+            let target = id.to_owned();
+            handle.listener.remote.spawn(move |handle| {
+                let guard = spawn_client.lock().unwrap();
+                if let Some(handler) = guard.handlers.get(&target) {
+                    handler(&guard.current_state, handle)
+                } else {
+                    Box::new(future::ok(()))
+                }
+            });
+        }
+        result
+    }
+}
 
-const ID_ART: *const c_char = b"gpmdp-album-art\0" as *const u8 as *const c_char;
+struct GpmdpModule {}
+
+impl obs::Module<GpmdpModule> for GpmdpModule {
+    fn load() -> Option<Self> {
+        let client_access = Arc::new(ClientAccess {
+            client: Mutex::new((Weak::default(), Weak::default())),
+        });
+        obs::register_source(
+            "gpmdp-album-art",
+            &obs_module_text("GPMDP Album Art"),
+            AlbumArtSourceDefinition::new(&client_access),
+        );
+        obs::register_source(
+            "gpmdp-now-playing",
+            &obs_module_text("GPMDP Now Playing"),
+            NowPlayingSourceDefinition::new(&client_access),
+        );
+        Some(Self {})
+    }
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct TrackPayload {
-    title: String,
-    artist: String,
-    album: String,
+    title: Option<String>,
+    artist: Option<String>,
+    album: Option<String>,
     album_art: Option<String>,
 }
 
@@ -134,48 +234,17 @@ enum Message {
 struct ListenerHandle {
     _thread: JoinHandle<()>,
     _shutdown: oneshot::Sender<()>,
+    remote: Remote,
 }
 
 impl ListenerHandle {
-    pub fn new(thread: JoinHandle<()>, shutdown: oneshot::Sender<()>) -> Self {
+    pub fn new(thread: JoinHandle<()>, shutdown: oneshot::Sender<()>, remote: Remote) -> Self {
         return ListenerHandle {
             _thread: thread,
             _shutdown: shutdown,
+            remote: remote,
         };
     }
-}
-
-fn set_text(target: *const c_char, text: &str) {
-    if let Some(mut source) = obs::get_source_by_name(target) {
-        match source.get_id().as_ref() {
-            "text_gdiplus" | "text_ft2_source" => {
-                debug!("text should be changed to {:?}", text);
-                let mut data = obs::Data::new();
-                data.set(KEY_TEXT, text);
-                source.update(&data);
-            }
-            id => {
-                debug!("cannot set text on source with id {}", id);
-            }
-        }
-    }
-}
-
-fn update_obs(track: &TrackPayload) {
-    set_text(TARGET_TITLE, &track.title);
-    set_text(TARGET_ARTIST, &track.artist);
-    set_text(TARGET_ALBUM, &track.album);
-    set_text(
-        TARGET_ARTIST_ALBUM,
-        &format!("{} - {}", &track.artist, &track.album),
-    );
-}
-
-fn clear_obs() {
-    set_text(TARGET_TITLE, "");
-    set_text(TARGET_ARTIST, "");
-    set_text(TARGET_ALBUM, "");
-    set_text(TARGET_ARTIST_ALBUM, "");
 }
 
 #[derive(Debug)]
@@ -186,14 +255,13 @@ enum ConnectionError {
 
 fn read_events(
     address: Url,
-    art: Arc<Mutex<Option<RgbaImage>>>,
+    client_state: Arc<Mutex<ClientState>>,
     handle: &Handle,
 ) -> Box<Future<Item = (), Error = ConnectionError>> {
     let retry_delay = Duration::new(1, 0);
     let retry_handle = handle.clone();
     let websocket_handle = handle.clone();
-    let art_handle = handle.clone();
-    let art_address: RefCell<Option<String>> = RefCell::new(None);
+    let update_handle = handle.clone();
     Box::new(
         ClientBuilder::from_url(&address)
             .async_connect_insecure(&websocket_handle)
@@ -243,42 +311,32 @@ fn read_events(
                     match message {
                         Ok(Message::Track(track)) => {
                             info!("got data: {:?}", track);
-                            update_obs(&track);
-                            let mut art_address = art_address.borrow_mut();
-                            let art = art.clone();
-                            match track.album_art {
-                                Some(ref url)
-                                    if art_address
-                                        .as_ref()
-                                        .map_or(true, |current| current != url) =>
-                                {
-                                    *art_address = Some(url.to_string());
-                                    Box::new(art::load(&url, &art_handle).then(move |result| {
-                                        match result {
-                                            Ok(new_art) => {
-                                                *art.lock().unwrap() = new_art;
-                                                info!("art loaded");
-                                            }
-                                            Err(err) => {
-                                                error!("{}", err);
-                                            }
-                                        }
-                                        future::ok(())
-                                    }))
-                                }
-                                Some(_) => Box::new(future::ok(())),
-                                None => {
-                                    *art.lock().unwrap() = None;
-                                    //TODO: clear art
-                                    Box::new(future::ok(()))
-                                        as Box<Future<Item = (), Error = ConnectionError>>
-                                }
-                            }
+                            let mut guard = client_state.lock().unwrap();
+                            guard.current_state = Some(GpmdpState {
+                                artist: track.artist,
+                                album: track.album,
+                                title: track.title,
+                                album_art: track.album_art,
+                            });
+                            Box::new(
+                                stream::futures_unordered(guard.handlers.values().map(|h| {
+                                    h(&guard.current_state, &update_handle)
+                                        .or_else(|_| future::ok(()))
+                                })).for_each(|_| future::ok(())),
+                            )
+                                as Box<Future<Item = (), Error = ConnectionError>>
                         }
                         Err(ConnectionError::WebSocketError(e)) => {
                             debug!("got error: {:?}", e);
-                            clear_obs();
-                            Box::new(future::ok(()))
+                            let mut guard = client_state.lock().unwrap();
+                            guard.current_state = None;
+                            Box::new(
+                                stream::futures_unordered(guard.handlers.values().map(|h| {
+                                    h(&guard.current_state, &update_handle)
+                                        .or_else(|_| future::ok(()))
+                                })).for_each(|_| future::ok(())),
+                            )
+                                as Box<Future<Item = (), Error = ConnectionError>>
                         }
                         Err(e) => Box::new(future::err(e))
                             as Box<Future<Item = (), Error = ConnectionError>>,
