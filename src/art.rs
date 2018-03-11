@@ -95,9 +95,17 @@ pub(super) struct AlbumArtSourceDefinition {
     client: Mutex<Weak<ArtClient>>,
 }
 
+// used to deal with sending data to a thread where we do not own the stack.
+// Mutex would work without having to hack anything, but then the mutex needs
+// to be obtained on the render thread three times per album art source per frame.
+struct UnsafeSync<T>(T);
+
+unsafe impl<T> Sync for UnsafeSync<T> {}
+
 struct ArtClient {
     _client: Client,
-    texture: Arc<Mutex<Option<Texture>>>,
+    // only access from the render thread!
+    texture: Arc<UnsafeSync<RefCell<Option<Texture>>>>,
 }
 
 impl AlbumArtSourceDefinition {
@@ -116,48 +124,49 @@ impl VideoSourceDefinition for AlbumArtSourceDefinition {
         let art_client = match guard.upgrade() {
             Some(art_client) => Some(art_client),
             None => {
-                let texture = Arc::new(Mutex::new(None));
+                let texture = Arc::new(UnsafeSync(RefCell::new(None)));
                 let art_address: RefCell<Option<String>> = RefCell::new(None);
                 let update_texture = texture.clone();
                 let client = self.client_access.client(&ClientId::Art, move |s, handle| {
                     let mut art_address = art_address.borrow_mut();
+                    let update_texture = update_texture.clone();
                     let address = s.as_ref()
                         .and_then(|s| s.album_art.as_ref())
                         .map(|s| s.as_str());
-                    let result: Box<Future<Item = (), Error = ()>> = match (&*art_address, address)
-                    {
-                        (_, None) => {
-                            let _graphics = obs::enter_graphics();
-                            let mut guard = update_texture.lock().unwrap();
-                            *guard = None;
-                            Box::new(future::ok(()))
-                        }
-                        (&Some(ref a), Some(b)) if a == b => Box::new(future::ok(())),
+                    let result = match (&*art_address, address) {
+                        (_, None) => Box::new(future::ok(Some(None))),
+                        (&Some(ref a), Some(b)) if a == b => Box::new(future::ok(None)),
                         (_, Some(address)) => {
-                            let update_texture = update_texture.clone();
-                            let err_texture = update_texture.clone();
                             let err_address = address.to_string();
                             Box::new(
                                 load(address, handle)
-                                    .and_then(move |image| {
+                                    .and_then(move |image| unsafe {
                                         let _graphics = obs::enter_graphics();
-                                        let mut guard = update_texture.lock().unwrap();
-                                        *guard = Some(Texture::new(&image));
-                                        future::ok(())
+                                        future::ok(Some(Some(Texture::new(&image))))
                                     })
                                     .or_else(move |err| {
                                         println!(
                                             "failed to load art from {}: {:?}",
                                             err_address, err
                                         );
-                                        let _graphics = obs::enter_graphics();
-                                        let mut guard = err_texture.lock().unwrap();
-                                        *guard = None;
-                                        future::ok(())
+                                        future::ok(Some(None))
                                     }),
                             )
+                                as Box<Future<Item = Option<Option<Texture>>, Error = ()>>
                         }
-                    };
+                    }.and_then(move |image| {
+                        let update_texture = update_texture.clone();
+                        image
+                            .map(move |image| {
+                                let update_texture = update_texture.clone();
+                                Box::new(obs::execute_main_render_callback(move |_, _| {
+                                    *update_texture.0.borrow_mut() = image;
+                                    Ok(())
+                                }))
+                                    as Box<Future<Item = (), Error = ()>>
+                            })
+                            .unwrap_or_else(|| Box::new(future::ok(())))
+                    });
                     *art_address = address.map(|a| a.to_string());
                     result
                 });
@@ -186,24 +195,24 @@ pub struct AlbumArtSource {
 }
 
 impl VideoSource for AlbumArtSource {
-    //FIXME: acquiring the lock three times is bad not atomic or performant
+    //FIXME: acquiring the lock three times is bad not performant
     fn get_width(&self) -> u32 {
         // obs doesn't like 0x0 sources
         self.client
             .as_ref()
-            .and_then(|c| c.texture.lock().unwrap().as_ref().map(|t| t.width()))
+            .and_then(|client| client.texture.0.borrow().as_ref().map(|t| t.width()))
             .unwrap_or(1)
     }
     fn get_height(&self) -> u32 {
         // obs doesn't like 0x0 sources
         self.client
             .as_ref()
-            .and_then(|c| c.texture.lock().unwrap().as_ref().map(|t| t.height()))
+            .and_then(|client| client.texture.0.borrow().as_ref().map(|t| t.height()))
             .unwrap_or(1)
     }
     fn video_render(&mut self) {
         if let Some(ref client) = self.client {
-            if let Some(ref texture) = *client.texture.lock().unwrap() {
+            if let Some(ref texture) = *client.texture.0.borrow() {
                 texture.draw();
             }
         }

@@ -8,27 +8,25 @@ pub struct Texture {
     height: u32,
 }
 impl Texture {
-    pub fn new(image: &RgbaImage) -> Self {
+    pub unsafe fn new(image: &RgbaImage) -> Self {
         let (width, height) = image.dimensions();
-        unsafe {
-            let mut scans = vec![ptr::null() as *const u8; height as usize];
-            for i in 0..height {
-                scans[i as usize] = mem::transmute(image.get_pixel(0, i));
-            }
+        let mut scans = vec![ptr::null() as *const u8; height as usize];
+        for i in 0..height {
+            scans[i as usize] = mem::transmute(image.get_pixel(0, i));
+        }
 
-            let texture = libobs::gs_texture_create(
-                width,
-                height,
-                libobs::gs_color_format::GS_RGBA,
-                1,
-                scans.as_ptr() as *mut *const u8,
-                0,
-            );
-            Texture {
-                texture: texture,
-                width: width,
-                height: height,
-            }
+        let texture = libobs::gs_texture_create(
+            width,
+            height,
+            libobs::gs_color_format::GS_RGBA,
+            1,
+            scans.as_ptr() as *mut *const u8,
+            0,
+        );
+        Texture {
+            texture: texture,
+            width: width,
+            height: height,
         }
     }
     pub fn draw(&self) {
