@@ -1,7 +1,7 @@
 use std::ffi::CString;
 use std::mem;
 use std::os::raw::{c_char, c_void};
-use super::super::libobs;
+use libobs;
 use super::{Data, ObsSource, VideoSource, VideoSourceDefinition};
 
 pub(super) struct SourceDefinition<D>

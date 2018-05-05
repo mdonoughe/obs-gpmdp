@@ -1,9 +1,10 @@
 mod ffi;
 
+use libobs;
 use std::ffi::{CStr, CString};
 use std::{mem, ptr};
 use std::os::raw::c_void;
-use super::{libobs, Data, Properties};
+use super::{Data, Properties};
 
 pub struct ObsSource(*mut libobs::obs_source);
 

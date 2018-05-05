@@ -1,6 +1,6 @@
 use std::ffi::CString;
 use std::marker::PhantomData;
-use super::libobs;
+use libobs;
 
 pub struct Properties(Option<*mut libobs::obs_properties_t>);
 

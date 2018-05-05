@@ -4,6 +4,7 @@ extern crate hyper_tls;
 extern crate image;
 #[macro_use]
 extern crate lazy_static;
+extern crate libobs_sys as libobs;
 extern crate serde;
 #[macro_use]
 extern crate serde_derive;

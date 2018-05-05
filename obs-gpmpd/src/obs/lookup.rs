@@ -1,7 +1,7 @@
 use std::ffi::CStr;
 use std::os::raw::c_char;
 use std::ptr;
-use super::libobs;
+use libobs;
 
 pub struct Lookup(*mut libobs::lookup_t);
 

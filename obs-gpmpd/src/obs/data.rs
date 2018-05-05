@@ -1,5 +1,5 @@
 use std::ffi::{CStr, CString};
-use super::libobs;
+use libobs;
 
 pub struct Data(*mut libobs::obs_data_t);
 

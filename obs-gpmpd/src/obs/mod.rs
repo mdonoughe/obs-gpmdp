@@ -1,5 +1,3 @@
-mod libobs;
-
 mod callback;
 mod data;
 mod log;
@@ -9,11 +7,12 @@ mod source;
 mod texture;
 
 use std::os::raw::c_char;
+use libobs;
 
 pub use self::callback::execute_main_render_callback;
 pub use self::data::Data;
-pub use self::libobs::{obs_module_t, obs_text_type, LIBOBS_API_MAJOR_VER, LIBOBS_API_MINOR_VER,
-                       LIBOBS_API_PATCH_VER};
+pub use libobs::{obs_module_t, obs_text_type, LIBOBS_API_MAJOR_VER, LIBOBS_API_MINOR_VER,
+                 LIBOBS_API_PATCH_VER};
 pub use self::log::blog;
 pub use self::lookup::Lookup;
 pub use self::properties::{Properties, Property};

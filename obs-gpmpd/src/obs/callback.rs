@@ -3,7 +3,7 @@ use futures::sync::oneshot;
 use std::cell::Cell;
 use std::os::raw::c_void;
 use std::sync::Arc;
-use super::libobs;
+use libobs;
 
 pub trait RenderCallback {
     fn execute(&self, cx: u32, cy: u32);

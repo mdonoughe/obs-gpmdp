@@ -1,6 +1,6 @@
 use std::ffi::CString;
 use std::os::raw::c_char;
-use super::libobs;
+use libobs;
 
 const DUMMY_LOG_TEMPLATE: *const c_char = b"[gpmdp] %s\0" as *const u8 as *const c_char;
 

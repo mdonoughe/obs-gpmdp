@@ -1,0 +1,9 @@
+[package]
+name = "libobs-sys"
+version = "0.1.0"
+authors = ["Matthew Donoughe <mdonoughe@gmail.com>"]
+
+[lib]
+
+[build-dependencies]
+bindgen = "0.36"

@@ -1,6 +1,6 @@
 use image::RgbaImage;
 use std::{mem, ptr};
-use super::libobs;
+use libobs;
 
 pub struct Texture {
     texture: *mut libobs::gs_texture_t,
