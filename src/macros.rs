@@ -23,7 +23,8 @@ macro_rules! error {
 #[macro_export]
 macro_rules! obs_declare_module {
     ($type:ty, $name:expr, $description:expr) => {
-        static mut OBS_MODULE_POINTER: ::std::option::Option<*mut $crate::obs::obs_module_t> = ::std::option::Option::None;
+        static mut OBS_MODULE_POINTER: ::std::option::Option<*mut $crate::obs::obs_module_t> =
+            ::std::option::Option::None;
         const OBS_MODULE_NAME: &'static str = concat!($name, "\0");
         const OBS_MODULE_DESCRIPTION: &'static str = concat!($description, "\0");
         static mut MODULE_VALUE: ::std::option::Option<$type> = ::std::option::Option::None;
@@ -79,7 +80,9 @@ macro_rules! obs_module_use_default_locale {
         const OBS_MODULE_DEFAULT_LOCALE: &'static str = concat!($locale, "\0");
 
         lazy_static! {
-            static ref OBS_MODULE_LOOKUP: ::std::sync::RwLock<::std::option::Option<$crate::obs::Lookup>> = ::std::sync::RwLock::new(::std::option::Option::None);
+            static ref OBS_MODULE_LOOKUP:
+                ::std::sync::RwLock<::std::option::Option<$crate::obs::Lookup>>
+                = ::std::sync::RwLock::new(::std::option::Option::None);
         }
 
         pub fn obs_module_text(val: &str) -> ::std::borrow::Cow<str> {
@@ -101,7 +104,8 @@ macro_rules! obs_module_use_default_locale {
         #[no_mangle]
         pub unsafe extern "C" fn obs_module_set_locale(locale: *const ::std::os::raw::c_char) {
             let mut guard = OBS_MODULE_LOOKUP.write().unwrap();
-            *guard = ::std::option::Option::Some($crate::obs::load_locale(OBS_MODULE_POINTER.unwrap(),
+            *guard = ::std::option::Option::Some($crate::obs::load_locale(
+                OBS_MODULE_POINTER.unwrap(),
                 OBS_MODULE_DEFAULT_LOCALE.as_bytes().as_ptr() as *const ::std::os::raw::c_char,
                 locale))
         }

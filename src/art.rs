@@ -1,6 +1,7 @@
 use {Client, ClientAccess, ClientId};
-use futures::{future, Future, Stream};
-use hyper::{self, mime, Method, Request, StatusCode, Uri};
+use futures::prelude::*;
+use futures::future;
+use hyper::{self, mime, Method, Request, Response, StatusCode, Uri};
 use hyper::header::{q, Accept, ContentLength, ContentType, QualityItem};
 use hyper_tls::HttpsConnector;
 use image::{self, ImageFormat, RgbaImage};
@@ -14,6 +15,59 @@ use tokio_core::reactor::Handle;
 // 4MB: enough for a 1024x1024 ARGB raw bitmap.
 // for comparison, 3 minutes at 320kbps is about 7MB.
 const MAXIMUM_LENGTH: u64 = 4 * 1024 * 1024;
+
+fn decode_image(
+    response: Response,
+    address: &Rc<String>,
+) -> Box<Future<Item = RgbaImage, Error = String>> {
+    let length_okay = match response.headers().get() {
+        Some(&ContentLength(length)) if length > MAXIMUM_LENGTH => Err(format!(
+            "rejecting album art from {:?} because it is too large ({}MB)",
+            address,
+            length / (1024 * 1024)
+        )),
+        _ => Ok(()),
+    };
+    let format = match response
+        .headers()
+        .get()
+        .and_then(|t: &ContentType| Some((t.type_(), t.subtype())))
+    {
+        Some((mime::IMAGE, subtype)) if subtype == "webp" => Ok(ImageFormat::WEBP),
+        Some((mime::IMAGE, mime::JPEG)) => Ok(ImageFormat::JPEG),
+        Some((mime::IMAGE, mime::PNG)) => Ok(ImageFormat::PNG),
+        other => Err(format!(
+            "rejecting album art from {:?} because {:?} is not a supported image type",
+            address, other
+        )),
+    };
+    let address = address.clone();
+    Box::new(
+        length_okay
+            .and(format)
+            .into_future()
+            .and_then(move |format| {
+                //TODO: download, but reject as soon as it becomes too large
+                let decode_error_address = address.clone();
+                response
+                    .body()
+                    .concat2()
+                    .map_err(move |err| {
+                        format!("art download from {:?} failed: {:?}", address, err)
+                    })
+                    .and_then(move |body| {
+                        image::load_from_memory_with_format(&body, format)
+                            .and_then(|image| Ok(image.to_rgba()))
+                            .map_err(|err| {
+                                format!(
+                                    "could not decode album art from {:?} as {:?}: {:?}",
+                                    decode_error_address, format, err
+                                )
+                            })
+                    })
+            }),
+    )
+}
 
 pub fn load(address: &str, handle: &Handle) -> Box<Future<Item = RgbaImage, Error = String>> {
     let address = Rc::new(address.to_string());
@@ -29,6 +83,7 @@ pub fn load(address: &str, handle: &Handle) -> Box<Future<Item = RgbaImage, Erro
                     parse_error_address, err
                 )
             })
+            .into_future()
             .and_then(move |uri| {
                 let mut request = Request::new(Method::Get, uri);
                 request.headers_mut().set(Accept(vec![
@@ -37,55 +92,21 @@ pub fn load(address: &str, handle: &Handle) -> Box<Future<Item = RgbaImage, Erro
                     QualityItem::new(mime::IMAGE_PNG, q(800)),
                 ]));
                 let request_error_address = address.clone();
-                Ok(Box::new(
-                    client
-                        .request(request)
-                        .map_err(move |err| {
-                            format!(
-                                "could not load album art from {:?}: {:?}",
-                                request_error_address, err
-                            )
-                        })
-                        .and_then(move |response| {
-                            match response.status() {
-                                StatusCode::Ok => {
-                                    let format = match response.headers().get().and_then(|t: &ContentType| Some((t.type_(), t.subtype()))) {
-                                        Some((mime::IMAGE, subtype)) if subtype == "webp" => Ok(ImageFormat::WEBP),
-                                        Some((mime::IMAGE, mime::JPEG)) => Ok(ImageFormat::JPEG),
-                                        Some((mime::IMAGE, mime::PNG)) => Ok(ImageFormat::PNG),
-                                        other => {
-                                            Err(format!("rejecting album art from {:?} because {:?} is not a supported image type", address, other))
-                                        }
-                                    }?;
-                                    match response.headers().get() {
-                                        Some(&ContentLength(length)) if length > MAXIMUM_LENGTH => {
-                                            Err(format!("rejecting album art from {:?} because it is too large ({}MB)", address, length / (1024 * 1024)))
-                                        },
-                                        _ => {
-                                            //TODO: download, but reject as soon as it becomes too large
-                                            Ok(response.body()
-                                                .concat2()
-                                                .map_err(move |err| format!("art download from {:?} failed: {:?}", address, err))
-                                                .map(move |body| (body.to_vec(), format)))
-                                        }
-                                    }
-                                }
-                                status => Err(format!(
-                                    "got unexpected status code {:?} for {:?}",
-                                    status, address
-                                )),
-                            }
-                        }),
-                ) as Box<Future<Item = _, Error = _>>)
-            })
-            .unwrap_or_else(|err| Box::new(future::err(err)))
-            .and_then(|inner| inner)
-            .and_then(|(body, format): (Vec<u8>, _)| {
-                future::result(
-                    image::load_from_memory_with_format(&body, format)
-                        .and_then(|image| Ok(image.to_rgba()))
-                        .map_err(|err| format!("could not decode album art: {:?}", err)),
-                )
+                client
+                    .request(request)
+                    .map_err(move |err| {
+                        format!(
+                            "could not load album art from {:?}: {:?}",
+                            request_error_address, err
+                        )
+                    })
+                    .and_then(move |response| match response.status() {
+                        StatusCode::Ok => decode_image(response, &address),
+                        status => Box::new(future::err(format!(
+                            "got unexpected status code {:?} for {:?}",
+                            status, address
+                        ))),
+                    })
             }),
     )
 }
@@ -129,14 +150,18 @@ impl VideoSourceDefinition for AlbumArtSourceDefinition {
         let art_client = match guard.upgrade() {
             Some(art_client) => Some(art_client),
             None => {
-                let data = Arc::new(UnsafeSync(RefCell::new(ArtData { is_playing: false, texture: None })));
+                let data = Arc::new(UnsafeSync(RefCell::new(ArtData {
+                    is_playing: false,
+                    texture: None,
+                })));
                 let art_address: RefCell<Option<String>> = RefCell::new(None);
                 let update_data = data.clone();
                 let client = self.client_access.client(&ClientId::Art, move |s, handle| {
                     let is_playing = s.is_playing;
                     let mut art_address = art_address.borrow_mut();
                     let update_data = update_data.clone();
-                    let address = s.track.as_ref()
+                    let address = s.track
+                        .as_ref()
                         .and_then(|s| s.album_art.as_ref())
                         .map(|s| s.as_str());
                     let result = match (&*art_address, address) {
@@ -169,8 +194,7 @@ impl VideoSourceDefinition for AlbumArtSourceDefinition {
                                 data.texture = image;
                             }
                             Ok(())
-                        }))
-                            as Box<Future<Item = (), Error = ()>>
+                        })) as Box<Future<Item = (), Error = ()>>
                     });
                     *art_address = address.map(|a| a.to_string());
                     result
@@ -179,7 +203,7 @@ impl VideoSourceDefinition for AlbumArtSourceDefinition {
                     Ok(client) => {
                         let art_client = Arc::new(ArtClient {
                             _client: client,
-                            data: data
+                            data: data,
                         });
                         *guard = Arc::downgrade(&art_client);
                         Some(art_client)

@@ -94,7 +94,10 @@ impl Client {
         let (shutdown_send, shutdown_receive) = oneshot::channel::<()>();
         let address = Url::parse("ws://127.0.0.1:5672").unwrap();
         let client = Arc::new(Mutex::new(ClientState {
-            current_state: GpmdpState{is_playing: false, track: None},
+            current_state: GpmdpState {
+                is_playing: false,
+                track: None,
+            },
             handlers: BTreeMap::new(),
         }));
         let core_client = client.clone();
@@ -277,7 +280,8 @@ fn read_events(
             .chain(
                 stream::repeat(())
                 .and_then(move |_| {
-                    Timeout::new(retry_delay, &retry_handle).map_err(|err| ConnectionError::TimerError(err))
+                    Timeout::new(retry_delay, &retry_handle)
+                        .map_err(|err| ConnectionError::TimerError(err))
                 })
                 .fuse() // make timer errors fatal
                 .and_then(move |_| {
