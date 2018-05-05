@@ -18,7 +18,7 @@ impl Texture {
         let texture = libobs::gs_texture_create(
             width,
             height,
-            libobs::gs_color_format::GS_RGBA,
+            libobs::gs_color_format_GS_RGBA,
             1,
             scans.as_ptr() as *mut *const u8,
             0,

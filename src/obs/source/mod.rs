@@ -130,7 +130,7 @@ where
         si.id = type_data.id.as_ptr();
         si.type_data = Box::into_raw(type_data) as *mut c_void;
         si.free_type_data = Some(ffi::source_free_type_data::<D>);
-        si.type_ = libobs::obs_source_type::OBS_SOURCE_TYPE_INPUT;
+        si.type_ = libobs::obs_source_type_OBS_SOURCE_TYPE_INPUT;
         si.output_flags = libobs::OBS_SOURCE_VIDEO;
         si.get_name = Some(ffi::source_get_name::<D>);
         si.create = Some(ffi::source_create::<D>);
