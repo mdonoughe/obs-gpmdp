@@ -40,11 +40,17 @@ obs_declare_module!(
 obs_module_use_default_locale!("en-US");
 
 #[derive(Debug)]
-struct GpmdpState {
+struct GpmdpTrack {
     artist: Option<String>,
     album: Option<String>,
     title: Option<String>,
     album_art: Option<String>,
+}
+
+#[derive(Debug)]
+struct GpmdpState {
+    track: Option<GpmdpTrack>,
+    is_playing: bool,
 }
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -63,10 +69,10 @@ impl ClientId {
 }
 
 struct ClientState {
-    current_state: Option<GpmdpState>,
+    current_state: GpmdpState,
     handlers: BTreeMap<
         ClientId,
-        Box<Fn(&Option<GpmdpState>, &Handle) -> Box<Future<Item = (), Error = ()>> + Send>,
+        Box<Fn(&GpmdpState, &Handle) -> Box<Future<Item = (), Error = ()>> + Send>,
     >,
 }
 
@@ -88,7 +94,7 @@ impl Client {
         let (shutdown_send, shutdown_receive) = oneshot::channel::<()>();
         let address = Url::parse("ws://127.0.0.1:5672").unwrap();
         let client = Arc::new(Mutex::new(ClientState {
-            current_state: None,
+            current_state: GpmdpState{is_playing: false, track: None},
             handlers: BTreeMap::new(),
         }));
         let core_client = client.clone();
@@ -145,7 +151,7 @@ struct ClientAccess {
 impl ClientAccess {
     pub fn client<F, R>(&self, id: &ClientId, action: F) -> Result<Client, String>
     where
-        F: Fn(&Option<GpmdpState>, &Handle) -> R + Send + 'static,
+        F: Fn(&GpmdpState, &Handle) -> R + Send + 'static,
         R: IntoFuture<Item = (), Error = ()>,
         R::Future: 'static,
     {
@@ -228,6 +234,7 @@ struct TrackPayload {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", tag = "channel", content = "payload")]
 enum Message {
+    PlayState(bool),
     Track(TrackPayload),
 }
 
@@ -309,10 +316,22 @@ fn read_events(
             .then(
                 move |message| -> Box<Future<Item = (), Error = ConnectionError>> {
                     match message {
-                        Ok(Message::Track(track)) => {
-                            info!("got data: {:?}", track);
+                        Ok(Message::PlayState(playing)) => {
+                            info!("got play state data: {:?}", playing);
                             let mut guard = client_state.lock().unwrap();
-                            guard.current_state = Some(GpmdpState {
+                            guard.current_state.is_playing = playing;
+                            Box::new(
+                                stream::futures_unordered(guard.handlers.values().map(|h| {
+                                    h(&guard.current_state, &update_handle)
+                                        .or_else(|_| future::ok(()))
+                                })).for_each(|_| future::ok(())),
+                            )
+                                as Box<Future<Item = (), Error = ConnectionError>>
+                        }
+                        Ok(Message::Track(track)) => {
+                            info!("got track data: {:?}", track);
+                            let mut guard = client_state.lock().unwrap();
+                            guard.current_state.track = Some(GpmdpTrack {
                                 artist: track.artist,
                                 album: track.album,
                                 title: track.title,
@@ -329,7 +348,8 @@ fn read_events(
                         Err(ConnectionError::WebSocketError(e)) => {
                             debug!("got error: {:?}", e);
                             let mut guard = client_state.lock().unwrap();
-                            guard.current_state = None;
+                            guard.current_state.track = None;
+                            guard.current_state.is_playing = false;
                             Box::new(
                                 stream::futures_unordered(guard.handlers.values().map(|h| {
                                     h(&guard.current_state, &update_handle)

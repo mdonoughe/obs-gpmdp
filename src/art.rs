@@ -102,10 +102,15 @@ struct UnsafeSync<T>(T);
 
 unsafe impl<T> Sync for UnsafeSync<T> {}
 
+struct ArtData {
+    is_playing: bool,
+    texture: Option<Texture>,
+}
+
 struct ArtClient {
     _client: Client,
     // only access from the render thread!
-    texture: Arc<UnsafeSync<RefCell<Option<Texture>>>>,
+    data: Arc<UnsafeSync<RefCell<ArtData>>>,
 }
 
 impl AlbumArtSourceDefinition {
@@ -124,13 +129,14 @@ impl VideoSourceDefinition for AlbumArtSourceDefinition {
         let art_client = match guard.upgrade() {
             Some(art_client) => Some(art_client),
             None => {
-                let texture = Arc::new(UnsafeSync(RefCell::new(None)));
+                let data = Arc::new(UnsafeSync(RefCell::new(ArtData { is_playing: false, texture: None })));
                 let art_address: RefCell<Option<String>> = RefCell::new(None);
-                let update_texture = texture.clone();
+                let update_data = data.clone();
                 let client = self.client_access.client(&ClientId::Art, move |s, handle| {
+                    let is_playing = s.is_playing;
                     let mut art_address = art_address.borrow_mut();
-                    let update_texture = update_texture.clone();
-                    let address = s.as_ref()
+                    let update_data = update_data.clone();
+                    let address = s.track.as_ref()
                         .and_then(|s| s.album_art.as_ref())
                         .map(|s| s.as_str());
                     let result = match (&*art_address, address) {
@@ -155,17 +161,16 @@ impl VideoSourceDefinition for AlbumArtSourceDefinition {
                                 as Box<Future<Item = Option<Option<Texture>>, Error = ()>>
                         }
                     }.and_then(move |image| {
-                        let update_texture = update_texture.clone();
-                        image
-                            .map(move |image| {
-                                let update_texture = update_texture.clone();
-                                Box::new(obs::execute_main_render_callback(move |_, _| {
-                                    *update_texture.0.borrow_mut() = image;
-                                    Ok(())
-                                }))
-                                    as Box<Future<Item = (), Error = ()>>
-                            })
-                            .unwrap_or_else(|| Box::new(future::ok(())))
+                        let update_data = update_data.clone();
+                        Box::new(obs::execute_main_render_callback(move |_, _| {
+                            let data = &mut *update_data.0.borrow_mut();
+                            data.is_playing = is_playing;
+                            if let Some(image) = image {
+                                data.texture = image;
+                            }
+                            Ok(())
+                        }))
+                            as Box<Future<Item = (), Error = ()>>
                     });
                     *art_address = address.map(|a| a.to_string());
                     result
@@ -174,7 +179,7 @@ impl VideoSourceDefinition for AlbumArtSourceDefinition {
                     Ok(client) => {
                         let art_client = Arc::new(ArtClient {
                             _client: client,
-                            texture: texture,
+                            data: data
                         });
                         *guard = Arc::downgrade(&art_client);
                         Some(art_client)
@@ -195,25 +200,27 @@ pub struct AlbumArtSource {
 }
 
 impl VideoSource for AlbumArtSource {
-    //FIXME: acquiring the lock three times is bad not performant
     fn get_width(&self) -> u32 {
         // obs doesn't like 0x0 sources
         self.client
             .as_ref()
-            .and_then(|client| client.texture.0.borrow().as_ref().map(|t| t.width()))
+            .and_then(|client| client.data.0.borrow().texture.as_ref().map(|t| t.width()))
             .unwrap_or(1)
     }
     fn get_height(&self) -> u32 {
         // obs doesn't like 0x0 sources
         self.client
             .as_ref()
-            .and_then(|client| client.texture.0.borrow().as_ref().map(|t| t.height()))
+            .and_then(|client| client.data.0.borrow().texture.as_ref().map(|t| t.height()))
             .unwrap_or(1)
     }
     fn video_render(&mut self) {
         if let Some(ref client) = self.client {
-            if let Some(ref texture) = *client.texture.0.borrow() {
-                texture.draw();
+            let data = client.data.0.borrow();
+            if data.is_playing {
+                if let Some(ref texture) = data.texture {
+                    texture.draw();
+                }
             }
         }
     }

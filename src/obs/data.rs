@@ -53,6 +53,10 @@ impl Data {
         }
     }
 
+    pub fn get_bool(&self, key: &str) -> bool {
+        unsafe { libobs::obs_data_get_bool(self.0, CString::new(key).unwrap().as_ptr()) }
+    }
+
     pub fn apply(&mut self, other: &Self) {
         unsafe {
             libobs::obs_data_apply(self.0, other.0);

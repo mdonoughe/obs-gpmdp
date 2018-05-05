@@ -1,6 +1,7 @@
 use {Client, ClientAccess, ClientId};
 use futures::future;
 use obs::{self, Data, ObsSource, Properties, VideoSource, VideoSourceDefinition};
+use std::borrow::Cow;
 use std::sync::Arc;
 use tera::{self, Tera};
 
@@ -10,21 +11,29 @@ const TEXT_TYPE: &str = "text_gdiplus";
 const TEXT_TYPE: &str = "text_ft2_source";
 
 fn create_child_settings(settings: &Data) -> Data {
-    let artist = settings.get_string("artist");
-    let album = settings.get_string("album");
-    let title = settings.get_string("title");
-    let template = settings.get_string("text");
-    let template = template.as_ref().map(|s| s.as_str()).unwrap_or("");
+    let is_playing = settings.get_bool("is_playing");
 
-    let mut context = tera::Context::new();
-    context.add("artist", &artist);
-    context.add("album", &album);
-    context.add("title", &title);
-    let text = Tera::one_off(template, &context, false);
+    let text = if is_playing {
+        let artist = settings.get_string("artist");
+        let album = settings.get_string("album");
+        let title = settings.get_string("title");
+        let template = settings.get_string("text");
+        let template = template.as_ref().map(|s| s.as_str()).unwrap_or("");
+
+        let mut context = tera::Context::new();
+        context.add("artist", &artist);
+        context.add("album", &album);
+        context.add("title", &title);
+        Cow::Owned(
+            Tera::one_off(template, &context, false).unwrap_or_else(|e| format!("error: {:?}", e)),
+        )
+    } else {
+        Cow::Borrowed("")
+    };
 
     let mut child_settings = Data::new();
     child_settings.apply(settings);
-    child_settings.set_string("text", &text.unwrap_or_else(|e| format!("error: {:?}", e)));
+    child_settings.set_string("text", &text);
     child_settings.set_bool("read_from_file", false);
     child_settings.set_bool("chatlog", false);
     child_settings
@@ -58,25 +67,29 @@ impl VideoSourceDefinition for NowPlayingSourceDefinition {
                         let mut data = Data::new();
                         data.set_string(
                             "artist",
-                            s.as_ref()
+                            s.track
+                                .as_ref()
                                 .and_then(|s| s.artist.as_ref())
                                 .map(|s| s.as_str())
                                 .unwrap_or(""),
                         );
                         data.set_string(
                             "album",
-                            s.as_ref()
+                            s.track
+                                .as_ref()
                                 .and_then(|s| s.album.as_ref())
                                 .map(|s| s.as_str())
                                 .unwrap_or(""),
                         );
                         data.set_string(
                             "title",
-                            s.as_ref()
+                            s.track
+                                .as_ref()
                                 .and_then(|s| s.title.as_ref())
                                 .map(|s| s.as_str())
                                 .unwrap_or(""),
                         );
+                        data.set_bool("is_playing", s.is_playing);
                         source.update(&data);
                     }
                     future::ok(())
