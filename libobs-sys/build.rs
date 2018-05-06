@@ -12,11 +12,26 @@ mod build_win;
 #[cfg(windows)]
 use build_win::find_windows_obs_lib;
 
+use bindgen::callbacks::{MacroParsingBehavior, ParseCallbacks};
 use std::env;
 use std::path::PathBuf;
 
 #[cfg(not(windows))]
 fn find_windows_obs_lib() {}
+
+#[derive(Debug)]
+struct MacroCallback();
+
+impl ParseCallbacks for MacroCallback {
+    fn will_parse_macro(&self, name: &str) -> MacroParsingBehavior {
+        match name {
+            "FP_ZERO" | "FP_SUBNORMAL" | "FP_NORMAL" | "FP_INFINITE" | "FP_NAN" => {
+                MacroParsingBehavior::Ignore
+            }
+            _ => MacroParsingBehavior::Default,
+        }
+    }
+}
 
 fn main() {
     // Tell cargo to tell rustc to link the system obs
@@ -29,6 +44,7 @@ fn main() {
     // to bindgen, and lets you build up options for
     // the resulting bindings.
     let bindings = bindgen::Builder::default()
+        .parse_callbacks(Box::new(MacroCallback()))
         // The input header we would like to generate
         // bindings for.
         .header("wrapper.h")

@@ -52,6 +52,8 @@ obs-gpmdp is the plugin itself. Inside obs-gpmdp the obs module tries to be a ge
 
 obs-gpmdp is built using [Cargo] which should be installed if you follow the [Rust installation instructions](https://www.rust-lang.org/en-US/install.html).
 
+You will need to install [Clang] for [rust-bindgen] to work. See [rust-bindgen requirements](https://rust-lang-nursery.github.io/rust-bindgen/requirements.html).
+
 On Windows the build script will try to find an installation of OBS to link against. On other systems you may need to set environment variables so the linker can find OBS.
 
 [OBS Studio]: https://obsproject.com/
@@ -60,3 +62,4 @@ On Windows the build script will try to find an installation of OBS to link agai
 [Rust]: https://www.rust-lang.org/en-US/
 [rust-bindgen]: https://rust-lang-nursery.github.io/rust-bindgen/
 [Cargo]: https://doc.rust-lang.org/cargo/guide/
+[Clang]: https://clang.llvm.org/

@@ -1,7 +1,9 @@
 #include "obs/libobs/obs-module.h"
 
 // there doesn't seem to be any official way of getting info.type_data during creation :(
+#ifdef __WINDOWS__
 typedef void *pthread_mutex_t;
+#endif
 
 struct obs_context_data
 {
