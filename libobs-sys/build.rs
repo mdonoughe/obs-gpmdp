@@ -1,12 +1,29 @@
 extern crate bindgen;
+#[cfg(windows)]
+extern crate cc;
+#[cfg(windows)]
+extern crate regex;
+#[cfg(windows)]
+extern crate winreg;
+
+#[cfg(windows)]
+mod build_win;
+
+#[cfg(windows)]
+use build_win::find_windows_obs_lib;
 
 use std::env;
 use std::path::PathBuf;
 
+#[cfg(not(windows))]
+fn find_windows_obs_lib() {}
+
 fn main() {
     // Tell cargo to tell rustc to link the system obs
     // shared library.
-    println!("cargo:rustc-link-lib=obs");
+    println!("cargo:rustc-link-lib=dylib=obs");
+
+    find_windows_obs_lib();
 
     // The bindgen::Builder is the main entry point
     // to bindgen, and lets you build up options for

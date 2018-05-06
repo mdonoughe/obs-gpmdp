@@ -52,7 +52,7 @@ obs-gpmdp is the plugin itself. Inside obs-gpmdp the obs module tries to be a ge
 
 obs-gpmdp is built using [Cargo] which should be installed if you follow the [Rust installation instructions](https://www.rust-lang.org/en-US/install.html).
 
-On Windows you should only need a Rust build environment because there is a copy of obs.lib in the repository. On other systems you may need to set environment variables so the linker can find obs.
+On Windows the build script will try to find an installation of OBS to link against. On other systems you may need to set environment variables so the linker can find OBS.
 
 [OBS Studio]: https://obsproject.com/
 [Google Play Music Desktop Player]: https://www.googleplaymusicdesktopplayer.com/
