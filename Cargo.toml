@@ -2,5 +2,5 @@
 
 members = [
     "libobs-sys",
-    "obs-gpmpd",
+    "obs-gpmdp",
 ]
