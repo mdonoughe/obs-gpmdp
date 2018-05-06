@@ -1,3 +1,6 @@
+#![cfg_attr(feature = "clippy", feature(plugin))]
+#![cfg_attr(feature = "clippy", plugin(clippy))]
+
 extern crate futures;
 extern crate hyper;
 extern crate hyper_tls;
@@ -69,12 +72,11 @@ impl ClientId {
     }
 }
 
+type Handler = Box<Fn(&GpmdpState, &Handle) -> Box<Future<Item = (), Error = ()>> + Send>;
+
 struct ClientState {
     current_state: GpmdpState,
-    handlers: BTreeMap<
-        ClientId,
-        Box<Fn(&GpmdpState, &Handle) -> Box<Future<Item = (), Error = ()>> + Send>,
-    >,
+    handlers: BTreeMap<ClientId, Handler>,
 }
 
 struct Client {
@@ -133,7 +135,7 @@ impl Client {
         match startup_receive.wait() {
             Ok(Ok(remote)) => Ok(Self {
                 id: id.to_owned(),
-                client: client,
+                client,
                 listener: Arc::new(ListenerHandle::new(thread, shutdown_send, remote)),
             }),
             Ok(Err(error)) => {
@@ -163,8 +165,8 @@ impl ClientAccess {
         let result = match (guard.0.upgrade(), guard.1.upgrade()) {
             (Some(client), Some(listener)) => Ok(Client {
                 id: id.to_owned(),
-                client: client,
-                listener: listener,
+                client,
+                listener,
             }),
             _ => {
                 let handle = Client::launch(id);
@@ -250,11 +252,11 @@ struct ListenerHandle {
 
 impl ListenerHandle {
     pub fn new(thread: JoinHandle<()>, shutdown: oneshot::Sender<()>, remote: Remote) -> Self {
-        return ListenerHandle {
+        ListenerHandle {
             _thread: thread,
             _shutdown: shutdown,
-            remote: remote,
-        };
+            remote,
+        }
     }
 }
 
@@ -276,19 +278,19 @@ fn read_events(
     Box::new(
         ClientBuilder::from_url(&address)
             .async_connect_insecure(&websocket_handle)
-            .map_err(|err| ConnectionError::WebSocketError(err))
+            .map_err(ConnectionError::WebSocketError)
             .into_stream()
             .chain(
                 stream::repeat(())
                 .and_then(move |_| {
                     Timeout::new(retry_delay, &retry_handle)
-                        .map_err(|err| ConnectionError::TimerError(err))
+                        .map_err(ConnectionError::TimerError)
                 })
                 .fuse() // make timer errors fatal
                 .and_then(move |_| {
                     ClientBuilder::from_url(&address)
                         .async_connect_insecure(&websocket_handle)
-                        .map_err(|err| ConnectionError::WebSocketError(err))
+                        .map_err(ConnectionError::WebSocketError)
                 }),
             )
             .and_then(|(duplex, _)| {
@@ -296,7 +298,7 @@ fn read_events(
                 let (_, stream) = duplex.split();
                 future::ok(
                     stream
-                        .map_err(|err| ConnectionError::WebSocketError(err))
+                        .map_err(ConnectionError::WebSocketError)
                         .filter_map(|message| {
                             match message {
                                 OwnedMessage::Text(ref text) => {

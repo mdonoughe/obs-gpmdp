@@ -173,7 +173,8 @@ pub fn source_create_private(
 
 pub fn get_source_defaults(id: &str) -> Option<Data> {
     unsafe {
-        let data = libobs::obs_get_source_defaults(CString::new(id).unwrap().as_ptr());
+        let id = CString::new(id).unwrap();
+        let data = libobs::obs_get_source_defaults(id.as_ptr());
         if data.is_null() {
             None
         } else {

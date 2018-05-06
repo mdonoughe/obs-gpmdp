@@ -18,17 +18,16 @@ impl Data {
 
     pub fn set_string(&mut self, key: &str, value: &str) {
         unsafe {
-            libobs::obs_data_set_string(
-                self.0,
-                CString::new(key).unwrap().as_ptr(),
-                CString::new(value).unwrap().as_ptr(),
-            );
+            let key = CString::new(key).unwrap();
+            let value = CString::new(value).unwrap();
+            libobs::obs_data_set_string(self.0, key.as_ptr(), value.as_ptr());
         }
     }
 
     pub fn get_string(&self, key: &str) -> Option<String> {
         unsafe {
-            let ptr = libobs::obs_data_get_string(self.0, CString::new(key).unwrap().as_ptr());
+            let key = CString::new(key).unwrap();
+            let ptr = libobs::obs_data_get_string(self.0, key.as_ptr());
             if ptr.is_null() {
                 None
             } else {
@@ -39,22 +38,24 @@ impl Data {
 
     pub fn set_default_string(&mut self, key: &str, value: &str) {
         unsafe {
-            libobs::obs_data_set_default_string(
-                self.0,
-                CString::new(key).unwrap().as_ptr(),
-                CString::new(value).unwrap().as_ptr(),
-            );
+            let key = CString::new(key).unwrap();
+            let value = CString::new(value).unwrap();
+            libobs::obs_data_set_default_string(self.0, key.as_ptr(), value.as_ptr());
         }
     }
 
     pub fn set_bool(&mut self, key: &str, value: bool) {
         unsafe {
-            libobs::obs_data_set_bool(self.0, CString::new(key).unwrap().as_ptr(), value);
+            let key = CString::new(key).unwrap();
+            libobs::obs_data_set_bool(self.0, key.as_ptr(), value);
         }
     }
 
     pub fn get_bool(&self, key: &str) -> bool {
-        unsafe { libobs::obs_data_get_bool(self.0, CString::new(key).unwrap().as_ptr()) }
+        unsafe {
+            let key = CString::new(key).unwrap();
+            libobs::obs_data_get_bool(self.0, key.as_ptr())
+        }
     }
 
     pub fn apply(&mut self, other: &Self) {

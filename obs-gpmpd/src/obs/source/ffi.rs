@@ -70,7 +70,7 @@ where
 {
     let source = &mut *(source as *mut S);
     let properties = source.get_properties();
-    properties.to_ptr()
+    properties.into_ptr()
 }
 
 pub(super) unsafe extern "C" fn source_update<S>(

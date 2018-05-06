@@ -203,7 +203,7 @@ impl VideoSourceDefinition for AlbumArtSourceDefinition {
                     Ok(client) => {
                         let art_client = Arc::new(ArtClient {
                             _client: client,
-                            data: data,
+                            data,
                         });
                         *guard = Arc::downgrade(&art_client);
                         Some(art_client)

@@ -35,8 +35,10 @@ where
     Arc::from_raw(cb);
 }
 
+type RunOnceData<T, R, E> = (T, oneshot::Sender<Result<R, E>>);
+
 struct RunOnce<T, R, E> {
-    state: Cell<Option<(T, oneshot::Sender<Result<R, E>>)>>,
+    state: Cell<Option<RunOnceData<T, R, E>>>,
 }
 
 unsafe impl<T, R, E> Sync for RunOnce<T, R, E> {}

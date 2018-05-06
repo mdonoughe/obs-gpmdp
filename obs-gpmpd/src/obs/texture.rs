@@ -1,5 +1,5 @@
-use image::RgbaImage;
-use std::{mem, ptr};
+use image::{Rgba, RgbaImage};
+use std::ptr;
 use libobs;
 
 pub struct Texture {
@@ -12,7 +12,7 @@ impl Texture {
         let (width, height) = image.dimensions();
         let mut scans = vec![ptr::null() as *const u8; height as usize];
         for i in 0..height {
-            scans[i as usize] = mem::transmute(image.get_pixel(0, i));
+            scans[i as usize] = image.get_pixel(0, i) as *const Rgba<u8> as *const u8;
         }
 
         let texture = libobs::gs_texture_create(
@@ -24,9 +24,9 @@ impl Texture {
             0,
         );
         Texture {
-            texture: texture,
-            width: width,
-            height: height,
+            texture,
+            width,
+            height,
         }
     }
     pub fn draw(&self) {
