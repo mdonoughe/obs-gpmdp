@@ -1,3 +1,5 @@
+Archived. GPMDP doesn't seem to exist anymore.
+
 # obs-gpmdp
 
 [OBS Studio] plugin for displaying information from [Google Play Music Desktop Player]
